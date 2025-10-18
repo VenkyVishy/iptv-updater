@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VENGATESH IPTV UPDATER — SELF-HEALING v23 (Optimized)
-- No duplicate or marketing links (e.g., iptvking.net, bestiptv4k.com removed)
-- Short URLs preserved (bit.ly, tinyurl.com)
-- Full GitHub repo cloning (.git)
-- 11 search engines + MAJOR_SITES for discovery
-- Auto-validate, auto-replace, auto-add
-- All languages, countries, categories from iptv-org
+VENGATESH IPTV UPDATER — v23 REAL-TIME MODE
+- All links included (no omissions)
+- Streams displayed AS SOON AS validated
+- Multi-threaded git cloning
+- Multi-process parsing
+- Fast silent replacement (pre-built index)
+- EPG + OTT metadata (synopsis, image, type)
+- Non-decreasing count
 - Outputs to Gist: https://gist.github.com/VenkyVishy/d80c0ac20b3ce6b8d94e06ff0e5e074a
 """
 import os
@@ -18,15 +19,20 @@ import json
 import time
 import tempfile
 import shutil
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import quote_plus, urlparse
 import subprocess
 
 # --------------------------- CONFIG ---------------------------
 TIMEOUT = 10
-VALIDATE_TIMEOUT = 6
-MAX_CONCURRENT = 60
-MAX_DISCOVERY_QUERIES = 15
+VALIDATE_TIMEOUT = 5
+MAX_CONCURRENT_HTTP = 70
+MAX_GIT_THREADS = 4
+MAX_PARSE_PROCESSES = 4
+MAX_DISCOVERY_QUERIES = 12
+MAX_REPLACEMENT_CANDIDATES = 3  # Only try top 3 per channel
 
 GITHUB_TOKEN = os.getenv('GH_TOKEN')
 GIST_DESCRIPTION = "VENGATESH_IPTV_V23_BACKUP_AUTO_SYNC"
@@ -96,18 +102,15 @@ MAJOR_SITES = [
     "bloomberg.com.tr", "eksisozluk.com"
 ]
 
-# ------------------------ TRUSTED SOURCES ONLY ----------------
-# Removed: all "marketing" IPTV sites (iptvking.net, bestiptv4k.com, etc.)
-# Kept: GitHub, CDNs, short URLs, official repos
+# ------------------------ ALL SOURCES (NO OMISSIONS) ----------
 ALL_SOURCES = [
-    # === GitHub Repositories (.git) ===
+    # GitHub Repositories (.git)
     "https://github.com/iptv-org/iptv.git",
     "https://github.com/Free-TV/IPTV.git",
     "https://github.com/mitthu786/TS-JioTV.git",
     "https://github.com/JioTV-Go/jiotv_go.git",
 
-    # === Official iptv-org Playlists (All Languages, Countries, Categories) ===
-    "https://iptv-org.github.io/iptv/index.m3u",
+    # Raw M3U/M3U8 from GitHub & CDNs
     "https://iptv-org.github.io/iptv/index.language.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/index.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/streams.m3u",
@@ -126,9 +129,92 @@ ALL_SOURCES = [
     "https://raw.githubusercontent.com/iptv-org/iptv/master/movies.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/series.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/vod.m3u",
-
-    # All countries
+    "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u",
+    "https://raw.githubusercontent.com/Free-TV/IPTV/master/channels.m3u",
+    "https://raw.githubusercontent.com/Free-TV/IPTV/master/ott.m3u",
+    "https://raw.githubusercontent.com/mitthu786/TS-JioTV/main/allChannels.m3u",
+    "https://raw.githubusercontent.com/JioTV-Go/jiotv_go/main/playlist.m3u",
+    "https://raw.githubusercontent.com/JioTV-Go/jiotv_go/main/playlist.m3u8",
+    "https://raw.githubusercontent.com/JioTV-Go/jiotv_go/main/jio.m3u",
+    "https://raw.githubusercontent.com/JioTV-Go/jiotv_go/main/jio.m3u8",
+    "https://raw.githubusercontent.com/EvilCaster/IPTV/master/iptv.txt",
+    "https://raw.githubusercontent.com/ivandimov1/iptv/main/playlist.m3u",
+    "https://raw.githubusercontent.com/git-up/IPTV/master/playlist.m3u",
+    "https://raw.githubusercontent.com/ImJanindu/IPTV/main/IPTV.m3u",
+    "https://raw.githubusercontent.com/azam00789/IPTV/main/playlist.m3u",
+    "https://raw.githubusercontent.com/blackheart001/IPTV/main/playlist.m3u",
+    "https://raw.githubusercontent.com/6eorge/iptv/master/playlist.m3u",
+    "https://raw.githubusercontent.com/Aretera/IPTV/master/playlist.m3u",
+    "https://raw.githubusercontent.com/ombori/iptv-playlist/master/playlist.m3u",
+    "https://raw.githubusercontent.com/hrishi7/streamIt/main/playlist.m3u",
+    "https://cdn.jsdelivr.net/gh/iptv-org/iptv/index.m3u",
+    "https://cdn.jsdelivr.net/gh/Free-TV/IPTV/playlist.m3u",
+    "https://rawcdn.githack.com/iptv-org/iptv/master/index.m3u",
+    "https://rawcdn.githack.com/Free-TV/IPTV/master/playlist.m3u",
+    "https://cdn.statically.io/gh/iptv-org/iptv/master/index.m3u",
+    "https://fastly.jsdelivr.net/gh/iptv-org/iptv/index.m3u",
+    "https://gcore.jsdelivr.net/gh/iptv-org/iptv/index.m3u",
+    "https://iptvx.one/playlist.m3u",
+    "https://iptv.smartott.net/playlist.m3u",
+    "https://iptvking.net/playlist.m3u",
+    "https://bestiptv4k.com/playlist.m3u",
+    "https://iptvpremium.servemp3.com/playlist.m3u",
+    "https://iptv-global.com/playlist.m3u",
+    "https://iptv-world.org/playlist.m3u",
+    "https://iptvhd.org/playlist.m3u",
+    "https://iptv-streams.com/playlist.m3u",
+    "https://iptv-channels.com/playlist.m3u",
+    "https://live-iptv.net/playlist.m3u",
+    "https://free-iptv.live/playlist.m3u",
+    "https://premium-iptv.org/playlist.m3u",
+    "https://iptv-premium.pro/playlist.m3u",
+    "https://best-iptv.pro/playlist.m3u",
+    "https://iptv-smart.com/playlist.m3u",
+    "https://iptv-box.org/playlist.m3u",
+    "https://iptv-hd.com/playlist.m3u",
+    "https://iptv-zone.com/playlist.m3u",
+    "https://iptv-world.net/playlist.m3u",
+    "https://iptvmaster.live/playlist.m3u",
+    "https://iptvuniverse.org/playlist.m3u",
+    "https://streamking-iptv.com/playlist.m3u",
+    "https://ultra-iptv.net/playlist.m3u",
+    "https://iptv-galaxy.com/playlist.m3u",
+    "https://supreme-iptv.org/playlist.m3u",
+    "https://iptv-ocean.com/playlist.m3u",
+    "https://iptv-diamond.net/playlist.m3u",
+    "https://iptv-mirror.com/playlist.m3u",
+    "https://backup-iptv.com/playlist.m3u",
+    "https://iptv-reserve.net/playlist.m3u",
+    "https://mirror.iptv-org.com/index.m3u",
+    "https://bit.ly/2E2uz5S",
+    "https://tinyurl.com/amaze-tamil-local-tv",
+    "https://bit.ly/3h5yNZM",
+    "https://bit.ly/3Jk4d7L",
+    "https://bit.ly/3Lm2p9Q",
+    "https://tinyurl.com/iptv-global-free",
+    "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/index.m3u8",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/playlist.m3u8",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/live.m3u8",
+    "https://iptv-org.github.io/iptv/index.m3u8",
+    "https://raw.githubusercontent.com/mitthu786/TS-JioTV/main/allChannels.m3u8",
+    "https://raw.githubusercontent.com/JioTV-Go/jiotv_go/main/playlist.m3u8",
+    "https://sites.google.com/site/arvinthiptv/Home/arvinth.m3u",
+    "https://raw.githubusercontent.com/Free-IPTV/Countries/master/IN/movies.m3u",
+    "https://raw.githubusercontent.com/Free-IPTV/Countries/master/US/movies.m3u",
+    "https://raw.githubusercontent.com/streamit-iptv/movies/main/playlist.m3u",
+    "https://raw.githubusercontent.com/ott-stream/ultimate/main/movies.m3u",
+    "https://raw.githubusercontent.com/ott-stream/ultimate/main/series.m3u",
+    "https://raw.githubusercontent.com/movie-streams/m3u/main/movies.m3u",
+    "https://raw.githubusercontent.com/series-streams/m3u/main/series.m3u",
+    "https://raw.githubusercontent.com/sports-iptv/sports/main/playlist.m3u",
+    "https://raw.githubusercontent.com/news-iptv/news/main/playlist.m3u",
+    "https://raw.githubusercontent.com/music-iptv/music/main/playlist.m3u",
+    "https://raw.githubusercontent.com/kids-iptv/kids/main/playlist.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/countries/au.m3u",
+    "https://iptv-org.github.io/iptv/countries/au.m3u",
+    "https://raw.githubusercontent.com/Free-IPTV/Countries/master/AU/tv.m3u",
+    "https://raw.githubusercontent.com/aussie-iptv/streams/main/playlist.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/countries/in.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/countries/us.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/countries/uk.m3u",
@@ -142,8 +228,26 @@ ALL_SOURCES = [
     "https://raw.githubusercontent.com/iptv-org/iptv/master/countries/kr.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/countries/ae.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/countries/sa.m3u",
-
-    # All categories
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/languages/hin.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/languages/tam.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/languages/eng.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/languages/spa.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/languages/fre.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/languages/ger.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/languages/chi.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/languages/ara.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/languages/por.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/indian.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/english.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/hindi.m3u",
+    "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/tamil.m3u",
+    "https://iptv.simplestv.com/playlist.m3u",
+    "https://iptv.smarters.tv/playlist.m3u",
+    "https://raw.githubusercontent.com/freearhey/iptv/master/playlist.m3u",
+    "https://raw.githubusercontent.com/ImJanindu/IsuruTV/main/IsuruTV.m3u",
+    "https://raw.githubusercontent.com/Free-IPTV/Countries/master/IN/tv.m3u",
+    "https://raw.githubusercontent.com/Free-IPTV/Countries/master/US/tv.m3u",
+    "https://raw.githubusercontent.com/Free-IPTV/Countries/master/UK/tv.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/categories/news.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/categories/sports.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/categories/music.m3u",
@@ -151,48 +255,6 @@ ALL_SOURCES = [
     "https://raw.githubusercontent.com/iptv-org/iptv/master/categories/movies.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/categories/educational.m3u",
     "https://raw.githubusercontent.com/iptv-org/iptv/master/categories/entertainment.m3u",
-
-    # === Trusted Third-Party Repos ===
-    "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u",
-    "https://raw.githubusercontent.com/Free-TV/IPTV/master/channels.m3u",
-    "https://raw.githubusercontent.com/Free-TV/IPTV/master/ott.m3u",
-    "https://raw.githubusercontent.com/mitthu786/TS-JioTV/main/allChannels.m3u",
-    "https://raw.githubusercontent.com/mitthu786/TS-JioTV/main/allChannels.m3u8",
-    "https://raw.githubusercontent.com/JioTV-Go/jiotv_go/main/playlist.m3u",
-    "https://raw.githubusercontent.com/JioTV-Go/jiotv_go/main/playlist.m3u8",
-    "https://raw.githubusercontent.com/JioTV-Go/jiotv_go/main/jio.m3u",
-    "https://raw.githubusercontent.com/JioTV-Go/jiotv_go/main/jio.m3u8",
-
-    # === CDNs ===
-    "https://cdn.jsdelivr.net/gh/iptv-org/iptv/index.m3u",
-    "https://cdn.jsdelivr.net/gh/Free-TV/IPTV/playlist.m3u",
-    "https://rawcdn.githack.com/iptv-org/iptv/master/index.m3u",
-    "https://cdn.statically.io/gh/iptv-org/iptv/master/index.m3u",
-    "https://fastly.jsdelivr.net/gh/iptv-org/iptv/index.m3u",
-    "https://gcore.jsdelivr.net/gh/iptv-org/iptv/index.m3u",
-
-    # === Short URLs (PRESERVED) ===
-    "https://bit.ly/2E2uz5S",
-    "https://tinyurl.com/amaze-tamil-local-tv",
-    "https://bit.ly/3h5yNZM",
-    "https://bit.ly/3Jk4d7L",
-    "https://bit.ly/3Lm2p9Q",
-    "https://tinyurl.com/iptv-global-free",
-
-    # === Other trusted raw sources ===
-    "https://raw.githubusercontent.com/freearhey/iptv/master/playlist.m3u",
-    "https://raw.githubusercontent.com/ImJanindu/IsuruTV/main/IsuruTV.m3u",
-    "https://raw.githubusercontent.com/Free-IPTV/Countries/master/IN/tv.m3u",
-    "https://raw.githubusercontent.com/Free-IPTV/Countries/master/US/tv.m3u",
-    "https://raw.githubusercontent.com/Free-IPTV/Countries/master/UK/tv.m3u",
-    "https://raw.githubusercontent.com/aussie-iptv/streams/main/playlist.m3u",
-    "https://raw.githubusercontent.com/streamit-iptv/movies/main/playlist.m3u",
-    "https://raw.githubusercontent.com/ott-stream/ultimate/main/movies.m3u",
-    "https://raw.githubusercontent.com/ott-stream/ultimate/main/series.m3u",
-    "https://raw.githubusercontent.com/sports-iptv/sports/main/playlist.m3u",
-    "https://raw.githubusercontent.com/news-iptv/news/main/playlist.m3u",
-    "https://raw.githubusercontent.com/music-iptv/music/main/playlist.m3u",
-    "https://raw.githubusercontent.com/kids-iptv/kids/main/playlist.m3u"
 ]
 
 # ------------------------ UTILITIES ---------------------------
@@ -205,11 +267,60 @@ def extract_channel_name(info_line: str) -> str:
         return match.group(1).strip()
     return "Unknown"
 
-def is_m3u_content(text: str) -> bool:
-    return any(line.startswith('#EXTINF:') for line in text.splitlines()[:10])
+def infer_ott_type(info: str, url: str) -> str:
+    lower = (info + url).lower()
+    if any(kw in lower for kw in ["movie", "film", "cinema", "/movies", "vod"]):
+        return "movie"
+    elif any(kw in lower for kw in ["series", "season", "episode", "/series", "web series"]):
+        return "series"
+    else:
+        return "live"
 
-# ------------------------ GIT CLONING -------------------------
-async def clone_and_extract_m3u(git_url):
+def generate_synopsis(title: str, stream_type: str) -> str:
+    if stream_type == "movie":
+        return f"Full-length cinematic content: {title}."
+    elif stream_type == "series":
+        return f"Episodic television or web series: {title}."
+    else:
+        return f"Live broadcast channel: {title}."
+
+def extract_logo(info: str) -> str:
+    match = re.search(r'tvg-logo=["\']?([^"\']*)', info)
+    return match.group(1).strip() if match and match.group(1).strip() else ""
+
+# ------------------------ PARSE M3U (Multi-Processing) -------
+def parse_m3u_content(content: str) -> list:
+    streams = []
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith('#EXTINF:') and i + 1 < len(lines):
+            url = lines[i + 1].strip()
+            info = lines[i].strip()
+            if url.startswith(('http', 'rtmp', 'rtsp')) and '.m3u' not in url.lower():
+                streams.append((url, info))
+            i += 2
+        else:
+            i += 1
+    return streams
+
+def bulk_parse_contents(contents: list) -> tuple:
+    with multiprocessing.Pool(processes=MAX_PARSE_PROCESSES) as pool:
+        results = pool.map(parse_m3u_content, contents)
+    candidate = {}
+    replacement_index = {}
+    for stream_list in results:
+        for url, info in stream_list:
+            if url not in candidate:
+                candidate[url] = info
+                name = extract_channel_name(info).lower()
+                if name not in replacement_index:
+                    replacement_index[name] = []
+                replacement_index[name].append((url, info))
+    return candidate, replacement_index
+
+# ------------------------ GIT CLONING (Threaded) -------------
+def clone_and_extract_m3u_sync(git_url):
     if not git_url.endswith('.git'):
         return []
     repo_name = urlparse(git_url).path.rstrip('.git').replace('/', '_')
@@ -224,7 +335,7 @@ async def clone_and_extract_m3u(git_url):
                     try:
                         with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                             content = f.read()
-                            if is_m3u_content(content):
+                            if any(line.startswith('#EXTINF:') for line in content.splitlines()[:10]):
                                 m3u_contents.append(content)
                     except Exception:
                         continue
@@ -251,7 +362,7 @@ async def validate_stream(session, url):
 async def scrape_search_engine(session, query, template):
     results = set()
     url = template.format(query=quote_plus(query))
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
     try:
         async with session.get(url, headers=headers, timeout=12) as resp:
             if resp.status == 200:
@@ -266,21 +377,10 @@ async def scrape_search_engine(session, query, template):
 
 async def discover_via_search_engines():
     queries = [
-        "filetype:m3u8 iptv",
-        "ext:m3u site:github.com iptv",
-        "live tv m3u playlist",
-        "indian channels m3u8",
-        "tamil live tv m3u8 2025",
-        "iptv playlist m3u8 github",
-        "m3u8 live streams 2025",
-        "free iptv m3u8 working",
-        "ott playlist m3u8",
-        "sports channels m3u8",
-        "news channels m3u8",
-        "movies m3u8 2025",
-        "web series m3u8 free",
-        "vod playlist m3u8",
-        "global iptv m3u8"
+        "filetype:m3u8 iptv", "ext:m3u site:github.com iptv", "live tv m3u playlist",
+        "indian channels m3u8", "tamil live tv m3u8 2025", "iptv playlist m3u8 github",
+        "free iptv m3u8 working", "ott playlist m3u8", "sports channels m3u8",
+        "movies m3u8 2025", "web series m3u8 free", "global iptv m3u8"
     ]
     discovered = set()
     timeout = aiohttp.ClientTimeout(total=12)
@@ -295,46 +395,23 @@ async def discover_via_search_engines():
                     continue
     return list(discovered)
 
-# ------------------------ AUTO-REPLACEMENT --------------------
-async def find_replacement(session, name, all_contents):
-    name_norm = name.strip().lower()
-    candidates = []
-    for content in all_contents:
-        lines = content.splitlines()
-        i = 0
-        while i < len(lines):
-            if lines[i].startswith('#EXTINF:') and i+1 < len(lines):
-                url = lines[i+1].strip()
-                info = lines[i]
-                tvg_match = re.search(r'tvg-name=["\']?([^"\']*)', info, re.IGNORECASE)
-                tvg = tvg_match.group(1).strip().lower() if tvg_match else ""
-                ch_name = extract_channel_name(info).lower()
-                if (tvg and tvg == name_norm) or (name_norm in ch_name):
-                    candidates.append((url, info))
-                i += 2
-                continue
-            i += 1
-    for url, info in candidates:
-        if await validate_stream(session, url):
-            return url, info
-    return None, None
-
 # ------------------------ MAIN UPDATER ------------------------
 async def main():
-    print(f"[{datetime.now()}] 🚀 Starting Vengatesh IPTV Updater v23 — Self-Healing Mode")
-    
+    print(f"[{datetime.now()}] 🚀 Vengatesh IPTV Updater v23 — Real-Time Mode")
     all_contents = []
 
-    # Step 1: Split sources
+    # Step 1: Process sources
     git_urls = [u.strip() for u in ALL_SOURCES if u.strip().endswith('.git')]
     raw_urls = [u.strip() for u in ALL_SOURCES if not u.strip().endswith('.git')]
 
-    # Step 2: Clone .git repos
+    # Step 2: Clone repos (threaded)
     print(f"📦 Cloning {len(git_urls)} GitHub repositories...")
-    clone_tasks = [clone_and_extract_m3u(url) for url in git_urls]
-    cloned_contents = await asyncio.gather(*clone_tasks)
-    for contents in cloned_contents:
-        all_contents.extend(contents)
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor(max_workers=MAX_GIT_THREADS) as executor:
+        tasks = [loop.run_in_executor(executor, clone_and_extract_m3u_sync, url) for url in git_urls]
+        cloned_results = await asyncio.gather(*tasks)
+        for contents in cloned_results:
+            all_contents.extend(contents)
 
     # Step 3: Fetch raw URLs
     print(f"📥 Fetching {len(raw_urls)} raw sources...")
@@ -347,16 +424,15 @@ async def main():
             if isinstance(resp, aiohttp.ClientResponse) and resp.status == 200:
                 try:
                     text = await resp.text()
-                    if is_m3u_content(text):
+                    if any(line.startswith('#EXTINF:') for line in text.splitlines()[:10]):
                         all_contents.append(text)
                 except:
                     pass
 
-    # Step 4: Discover via 11 search engines
+    # Step 4: Search engine discovery
     print("🔍 Discovering via 11 search engines...")
     search_urls = await discover_via_search_engines()
     if search_urls:
-        print(f"🔎 Found {len(search_urls)} new URLs")
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             tasks = [session.get(u) for u in search_urls if u not in raw_urls]
             responses = await asyncio.gather(*tasks, return_exceptions=True)
@@ -364,86 +440,104 @@ async def main():
                 if isinstance(resp, aiohttp.ClientResponse) and resp.status == 200:
                     try:
                         text = await resp.text()
-                        if is_m3u_content(text):
+                        if any(line.startswith('#EXTINF:') for line in text.splitlines()[:10]):
                             all_contents.append(text)
                     except:
                         pass
 
-    # Step 5: Parse all streams
-    print("🧩 Parsing streams...")
-    candidate_streams = {}
-    for content in all_contents:
-        lines = content.splitlines()
-        i = 0
-        while i < len(lines):
-            if lines[i].startswith('#EXTINF:') and i+1 < len(lines):
-                url = lines[i+1].strip()
-                info = lines[i].strip()
-                if url.startswith(('http', 'rtmp', 'rtsp')) and '.m3u' not in url.lower() and url not in candidate_streams:
-                    candidate_streams[url] = info
-                i += 2
-            else:
-                i += 1
+    # Step 5: Bulk parse + build replacement index
+    print("🧩 Parsing streams and building index...")
+    candidate_streams, replacement_index = bulk_parse_contents(all_contents)
 
-    # Step 6: Validate + replace (non-decreasing count)
-    print(f"🔍 Validating {len(candidate_streams)} streams...")
+    # Step 6: Validate + display in real-time
+    print(f"🔍 Validating {len(candidate_streams)} streams (real-time display)...")
     validated = {}
+    global_validated = set()
+    broken = []
+
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=VALIDATE_TIMEOUT)) as session:
-        sem = asyncio.Semaphore(MAX_CONCURRENT)
+        sem = asyncio.Semaphore(MAX_CONCURRENT_HTTP)
+        
         async def validate_one(url, info):
             async with sem:
+                if url in global_validated:
+                    validated[url] = info
+                    return
                 if await validate_stream(session, url):
                     validated[url] = info
+                    global_validated.add(url)
+                    title = extract_channel_name(info)
+                    print(f"✅ [{len(validated)}] {title} → {url}")
                 else:
-                    name = extract_channel_name(info)
-                    rep_url, rep_info = await find_replacement(session, name, all_contents)
-                    if rep_url and rep_url not in validated:
-                        validated[rep_url] = rep_info
+                    broken.append((url, info))
 
         await asyncio.gather(*[validate_one(url, info) for url, info in candidate_streams.items()])
 
-    print(f"✅ Validated {len(validated)} streams (non-decreasing)")
+        # Silent replacement (fast)
+        if broken:
+            print(f"🔄 Replacing {len(broken)} broken streams (max {MAX_REPLACEMENT_CANDIDATES} tries per channel)...")
+            for url, info in broken:
+                name = extract_channel_name(info).lower()
+                candidates = replacement_index.get(name, [])
+                for rep_url, rep_info in candidates[:MAX_REPLACEMENT_CANDIDATES]:
+                    if rep_url in global_validated or rep_url in validated:
+                        continue
+                    if await validate_stream(session, rep_url):
+                        validated[rep_url] = rep_info
+                        global_validated.add(rep_url)
+                        title = extract_channel_name(rep_info)
+                        print(f"🔁 [{len(validated)}] Replaced → {title}")
+                        break
+
+    print(f"🎉 Final count: {len(validated)} streams")
 
     # Step 7: Build M3U + JSON
     epg_str = ','.join(EPG_SOURCES)
-    m3u_content = f'#EXTM3U x-tvg-url="{epg_str}"\n'
-    m3u_content += '\n'.join(f"{info}\n{url}" for url, info in validated.items())
+    m3u_lines = [f'#EXTM3U x-tvg-url="{epg_str}"']
+    json_validated = {}
 
-    json_backup = {
-        "persistence": {
-            "validated": {
-                url: {
-                    "info": info,
-                    "ok": True,
-                    "last_validated": time.time(),
-                    "title": extract_channel_name(info),
-                    "metadata": {
-                        "type": "movie" if "movie" in info.lower() or "vod" in url.lower() else "series" if "series" in info.lower() else "live"
-                    }
-                }
-                for url, info in validated.items()
+    for url, info in validated.items():
+        title = extract_channel_name(info)
+        stream_type = infer_ott_type(info, url)
+        logo = extract_logo(info)
+        synopsis = generate_synopsis(title, stream_type)
+
+        m3u_lines.append(info)
+        m3u_lines.append(url)
+
+        json_validated[url] = {
+            "info": info,
+            "ok": True,
+            "last_validated": time.time(),
+            "title": title,
+            "metadata": {
+                "type": stream_type,
+                "synopsis": synopsis,
+                "image": logo
             }
-        },
+        }
+
+    m3u_content = '\n'.join(m3u_lines)
+    json_backup = {
+        "persistence": {"validated": json_validated},
         "global_total": len(validated),
         "backup_timestamp": time.time(),
         "device_id": os.getenv('GITHUB_REPOSITORY', 'termux')
     }
-
     json_str = json.dumps(json_backup, indent=2)
 
     # Step 8: Update Gist
     if not GITHUB_TOKEN:
-        print("⚠️ GH_TOKEN not set. Saving locally.")
         with open("playlist.m3u", "w", encoding="utf-8") as f:
             f.write(m3u_content)
         with open("vengatesh_iptv_backup.json", "w", encoding="utf-8") as f:
             f.write(json_str)
+        print("✅ Saved locally")
         return
 
     print("☁️ Updating Gist...")
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     gist_id = None
-
     async with aiohttp.ClientSession() as session:
         async with session.get("https://api.github.com/gists", headers=headers) as r:
             if r.status == 200:
@@ -471,10 +565,10 @@ async def main():
                     gist_id = data['id']
 
         if gist_id:
-            raw_url = f"https://gist.githubusercontent.com/VenkyVishy/{gist_id}/raw/playlist.m3u"
-            print(f"✅ SUCCESS! Playlist: {raw_url}")
+            print(f"✅ SUCCESS! Gist updated with {len(validated)} streams")
         else:
             print("❌ Gist update failed")
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
     asyncio.run(main())
