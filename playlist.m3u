@@ -1,1 +1,5 @@
 #EXTM3U
+#EXTINF:-1 tvg-name="HBO" tvg-country="US",HBO
+https://cdn-4.pishow.tv/live/1473/master.m3u8
+#EXTINF:-1 tvg-name="ESPN" tvg-country="US",ESPN
+http://23.237.104.106:8080/USA_ESPNU/index.m3u8
